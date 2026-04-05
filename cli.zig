@@ -4,6 +4,7 @@ const wav = @import("./wav.zig");
 
 const CliArgs = struct {
     play: bool,
+    interactive: bool,
     seekSec: f64,
     ytUrl: ?[]const u8,
     inputFromStdin: bool,
@@ -38,10 +39,11 @@ var rt_emitted: usize = 0;
 var rt_peak: f32 = 0;
 
 fn printUsage() void {
-    std.debug.print("Usage: zig run cli.zig -- [--play|-p] [--seek <sec|mm:ss|hh:mm:ss>] <input.mp3|-> [output.wav]\n", .{});
-    std.debug.print("   or: zig run cli.zig -- [--play|-p] [--seek <sec|mm:ss|hh:mm:ss>] --yt <youtube-url> [output.wav]\n", .{});
+    std.debug.print("Usage: zig run cli.zig -- [--play|-p] [--interactive] [--seek <sec|mm:ss|hh:mm:ss>] <input.mp3|-> [output.wav]\n", .{});
+    std.debug.print("   or: zig run cli.zig -- [--play|-p] [--interactive] [--seek <sec|mm:ss|hh:mm:ss>] --yt <youtube-url> [output.wav]\n", .{});
     std.debug.print("\n", .{});
-    std.debug.print("  --play, -p   Decode and play in terminal via ffplay/aplay/paplay\n", .{});
+    std.debug.print("  --play, -p      Decode and play in terminal via ffplay/aplay/paplay\n", .{});
+    std.debug.print("  --interactive   Enable keyboard seek controls (TTY only)\n", .{});
     std.debug.print("  --seek <t>   Start playback from offset (sec, mm:ss, or hh:mm:ss)\n", .{});
     std.debug.print("  --yt <url>   Fetch YouTube audio via yt-dlp and transcode to MP3 via ffmpeg\n", .{});
     std.debug.print("  -            Read MP3 bytes from stdin (pipe input)\n", .{});
@@ -92,6 +94,7 @@ fn parseSeekSpecSeconds(raw: []const u8) ?f64 {
 
 fn parseCliArgs(allocator: std.mem.Allocator, argv: []const []const u8) !CliArgs {
     var play = false;
+    var interactive = false;
     var ytUrl: ?[]const u8 = null;
     var seekSec: f64 = 0;
     var positional = std.ArrayList([]const u8).empty;
@@ -102,6 +105,8 @@ fn parseCliArgs(allocator: std.mem.Allocator, argv: []const []const u8) !CliArgs
         const arg = argv[i];
         if (std.mem.eql(u8, arg, "--play") or std.mem.eql(u8, arg, "-p")) {
             play = true;
+        } else if (std.mem.eql(u8, arg, "--interactive")) {
+            interactive = true;
         } else if (std.mem.eql(u8, arg, "--seek")) {
             if (i + 1 >= argv.len) die("Error: --seek requires a time value.");
             const parsed = parseSeekSpecSeconds(argv[i + 1]) orelse die("Error: invalid seek value.");
@@ -131,6 +136,7 @@ fn parseCliArgs(allocator: std.mem.Allocator, argv: []const []const u8) !CliArgs
         }
         return .{
             .play = play,
+            .interactive = interactive,
             .seekSec = seekSec,
             .ytUrl = ytUrl,
             .inputFromStdin = false,
@@ -147,6 +153,7 @@ fn parseCliArgs(allocator: std.mem.Allocator, argv: []const []const u8) !CliArgs
     const inputFromStdin = std.mem.eql(u8, positional.items[0], "-");
     return .{
         .play = play,
+        .interactive = interactive,
         .seekSec = seekSec,
         .ytUrl = null,
         .inputFromStdin = inputFromStdin,
@@ -210,7 +217,8 @@ fn readInputBytes(allocator: std.mem.Allocator, args: CliArgs) !struct { bytes: 
     return .{ .bytes = try std.fs.cwd().readFileAlloc(allocator, p, std.math.maxInt(usize)), .label = p };
 }
 
-fn encodePcm16ChunkInPlace(pcm: []const f32, out: *[4608]u8) []const u8 {
+fn encodePcm16ChunkInPlace(pcm: []const f32, out: []u8) []const u8 {
+    std.debug.assert(out.len >= pcm.len * 2);
     var i: usize = 0;
     while (i < pcm.len) : (i += 1) {
         const s = pcm[i];
@@ -341,6 +349,9 @@ fn playPcmInteractiveWithSeek(allocator: std.mem.Allocator, pcm: []const f32, sa
     defer std.posix.tcsetattr(std.posix.STDIN_FILENO, .NOW, old_term) catch {};
 
     const interleaved_per_second: usize = sampleRate * channels;
+    const interleaved_per_chunk: usize = @max(@as(usize, 1), interleaved_per_second / 10);
+    const pcm16_chunk_buf = try allocator.alloc(u8, interleaved_per_chunk * 2);
+    defer allocator.free(pcm16_chunk_buf);
     var cursor: usize = @intFromFloat(@floor(initialSeekSec * @as(f64, @floatFromInt(interleaved_per_second))));
     if (cursor > pcm.len) cursor = pcm.len;
 
@@ -376,14 +387,13 @@ fn playPcmInteractiveWithSeek(allocator: std.mem.Allocator, pcm: []const f32, sa
                 break;
             }
 
-            const chunk_interleaved = @min(@as(usize, interleaved_per_second / 10), pcm.len - cursor);
+            const chunk_interleaved = @min(interleaved_per_chunk, pcm.len - cursor);
             const chunk = pcm[cursor .. cursor + chunk_interleaved];
             for (chunk) |v| {
                 const a = @abs(v);
                 if (a > peak) peak = a;
             }
-            var pcm16buf: [4608]u8 = undefined;
-            const pcm16 = encodePcm16ChunkInPlace(chunk, &pcm16buf);
+            const pcm16 = encodePcm16ChunkInPlace(chunk, pcm16_chunk_buf);
             child.stdin.?.writeAll(pcm16) catch break;
             cursor += chunk_interleaved;
             std.Thread.sleep(100 * std.time.ns_per_ms);
@@ -417,7 +427,7 @@ fn realtimeOnChunk(chunk: []const f32) anyerror!void {
         if (a > rt_peak) rt_peak = a;
     }
     var pcm16buf: [4608]u8 = undefined;
-    const pcm16 = encodePcm16ChunkInPlace(out, &pcm16buf);
+    const pcm16 = encodePcm16ChunkInPlace(out, pcm16buf[0..]);
     try rt_stdin_file.?.writeAll(pcm16);
     rt_emitted += out.len;
 }
@@ -476,9 +486,12 @@ pub fn main() !void {
     std.debug.print("Input:  {s}  ({s})\n", .{ input.label, in_size });
 
     const interactive_tty = std.fs.File.stdin().isTty() and std.fs.File.stdout().isTty();
+    if (args.play and args.interactive and !interactive_tty) {
+        std.debug.print("Note: --interactive requires a TTY; falling back to realtime playback.\n", .{});
+    }
 
-    // Realtime playback path: stream chunks directly while decoding.
-    if (args.play and args.outputPath == null and !interactive_tty) {
+    // Realtime playback path (default): stream chunks directly while decoding.
+    if (args.play and args.outputPath == null and (!args.interactive or !interactive_tty)) {
         var frameScan = try mp3decoder.decodeMp3Frames(allocator, input.bytes);
         defer frameScan.frames.deinit(allocator);
         if (frameScan.frameCount == 0 or frameScan.sampleRate == 0 or frameScan.channels == 0) {

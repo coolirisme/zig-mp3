@@ -52,14 +52,17 @@ zig build
 ## CLI Usage
 
 ```bash
-zig build run -- [--play|-p] [--seek <sec|mm:ss|hh:mm:ss>] <input.mp3|-> [output.wav]
-zig build run -- [--play|-p] [--seek <sec|mm:ss|hh:mm:ss>] --yt <youtube-url> [output.wav]
+zig build run -- [--play|-p] [--interactive] [--seek <sec|mm:ss|hh:mm:ss>] <input.mp3|-> [output.wav]
+zig build run -- [--play|-p] [--interactive] [--seek <sec|mm:ss|hh:mm:ss>] --yt <youtube-url> [output.wav]
 ```
 
 ### Options
 
 - `--play`, `-p`  
   Decode and play in terminal (`aplay`, `paplay`, or `ffplay`).
+
+- `--interactive`  
+  Enable keyboard controls (`<-` / `->` seek, `q` quit). Requires a TTY.
 
 - `--seek <t>`  
   Seek offset in seconds or `mm:ss` / `hh:mm:ss`.
@@ -88,6 +91,12 @@ Play audio:
 
 ```bash
 zig build run -- --play song.mp3
+```
+
+Play audio with interactive controls:
+
+```bash
+zig build run -- --play --interactive song.mp3
 ```
 
 Play with seek:
