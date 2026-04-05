@@ -416,6 +416,25 @@ fn skipId3v2(bytes: []const u8) usize {
     return 10 + size + (if (hasFooter) @as(usize, 10) else @as(usize, 0));
 }
 
+fn isXingOrInfoFrame(bytes: []const u8, header: FrameHeader) bool {
+    const isMono = header.channelModeBits == 3;
+    const sideInfoSize: usize = if (isMono) 17 else 32;
+    const dataStart = header.offset + 4 + (if (header.hasCrc) @as(usize, 2) else @as(usize, 0)) + sideInfoSize;
+    if (dataStart + 8 > bytes.len) return false;
+
+    const isXing =
+        bytes[dataStart] == 0x58 and // X
+        bytes[dataStart + 1] == 0x69 and // i
+        bytes[dataStart + 2] == 0x6E and // n
+        bytes[dataStart + 3] == 0x67; // g
+    const isInfo =
+        bytes[dataStart] == 0x49 and // I
+        bytes[dataStart + 1] == 0x6E and // n
+        bytes[dataStart + 2] == 0x66 and // f
+        bytes[dataStart + 3] == 0x6F; // o
+    return isXing or isInfo;
+}
+
 fn clamp(x: f64) f32 {
     if (x >= 1.0) return 1.0;
     if (x <= -1.0) return -1.0;
@@ -444,6 +463,7 @@ pub fn decodeAllFrames(allocator: std.mem.Allocator, buffer: []const u8) !Decode
     var sampleRate: u32 = 0;
     var channels: u8 = 0;
     var frameCount: usize = 0;
+    var firstFrame = true;
     const encoderDelay: usize = 0;
     const endPadding: usize = 0;
 
@@ -469,6 +489,13 @@ pub fn decodeAllFrames(allocator: std.mem.Allocator, buffer: []const u8) !Decode
         if (sampleRate == 0) {
             sampleRate = header.?.sampleRate;
             channels = if (header.?.channelModeBits == 3) 1 else 2;
+        }
+        if (firstFrame) {
+            firstFrame = false;
+            if (isXingOrInfoFrame(buffer, header.?)) {
+                offset += header.?.frameLength;
+                continue;
+            }
         }
 
         const decoded = try decodeFrame(allocator, buffer, header.?, &state);
@@ -547,6 +574,7 @@ pub fn decodeAllFramesRealtime(
     var sampleRate: u32 = 0;
     var channels: u8 = 0;
     var frameCount: usize = 0;
+    var firstFrame = true;
     const encoderDelay: usize = 0;
     const endPadding: usize = 0;
     var emittedInterleaved: usize = 0;
@@ -571,6 +599,13 @@ pub fn decodeAllFramesRealtime(
         if (sampleRate == 0) {
             sampleRate = header.?.sampleRate;
             channels = if (header.?.channelModeBits == 3) 1 else 2;
+        }
+        if (firstFrame) {
+            firstFrame = false;
+            if (isXingOrInfoFrame(buffer, header.?)) {
+                offset += header.?.frameLength;
+                continue;
+            }
         }
 
         const decoded = try decodeFrame(allocator, buffer, header.?, &state);

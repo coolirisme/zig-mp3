@@ -144,9 +144,7 @@ pub fn parseScaleFactors(data: []const u8, sideInfo: SideInfo, granule: Granule,
 /// Decode Huffman-coded spectral data for one granule/channel.
 pub fn parseHuffmanData(data: []const u8, offset: usize, maxbit: usize, bandIndexLong: []const u32, granule: Granule) [576]i32 {
     var samples: [576]i32 = [_]i32{0} ** 576;
-    var bitsArray: [4096]u8 = [_]u8{0} ** 4096;
-    const bitLen = @min(data.len, bitsArray.len - 160);
-    @memcpy(bitsArray[0..bitLen], data[0..bitLen]);
+    const bitsArray = data;
 
     var bitoffset = offset;
     var samplecount: usize = 0;
@@ -222,12 +220,12 @@ pub fn parseHuffmanData(data: []const u8, offset: usize, maxbit: usize, bandInde
     const bigValueLimit: usize = granule.bigValues * 2;
     while (samplecount < bigValueLimit) {
         const tableCtx = getTable(samplecount, granule, region0, region1);
-        const decoded = decodeTable(tableCtx, &bitoffset, bitsArray[0..]);
+            const decoded = decodeTable(tableCtx, &bitoffset, bitsArray);
         var s0: i32 = 0;
         var s1: i32 = 0;
         if (!(decoded.size == 0 and decoded.row == 0 and decoded.col == 0)) {
-            s0 = extendSample(decoded.tableId, @intCast(decoded.row), &bitoffset, bitsArray[0..]);
-            s1 = extendSample(decoded.tableId, @intCast(decoded.col), &bitoffset, bitsArray[0..]);
+            s0 = extendSample(decoded.tableId, @intCast(decoded.row), &bitoffset, bitsArray);
+            s1 = extendSample(decoded.tableId, @intCast(decoded.col), &bitoffset, bitsArray);
         }
         samples[samplecount] = s0;
         samples[samplecount + 1] = s1;
@@ -255,7 +253,7 @@ pub fn parseHuffmanData(data: []const u8, offset: usize, maxbit: usize, bandInde
         } else {
             var matched = false;
             for (tables.quadTable) |q| {
-                const readBits = bits.getBits32(bitoffset, q.huff.codeLength, bitsArray[0..]).value;
+                const readBits = bits.getBits32(bitoffset, q.huff.codeLength, bitsArray).value;
                 if (q.huff.code == readBits) {
                     bitoffset += q.huff.codeLength;
                     quadvalues = q.value;
