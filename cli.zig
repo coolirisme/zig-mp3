@@ -37,6 +37,30 @@ var rt_stdin_file: ?std.fs.File = null;
 var rt_seek_remaining: usize = 0;
 var rt_emitted: usize = 0;
 var rt_peak: f32 = 0;
+var rt_initial_seek_interleaved: usize = 0;
+var rt_total_interleaved: usize = 0;
+var rt_sample_rate: u32 = 0;
+var rt_channels: u8 = 0;
+var rt_last_progress_ms: i64 = 0;
+
+fn printPlaybackProgress(current_interleaved: usize, total_interleaved: usize, sampleRate: u32, channels: u8) void {
+    if (sampleRate == 0 or channels == 0 or total_interleaved == 0) return;
+    const width: usize = 28;
+    var bar: [width]u8 = [_]u8{' '} ** width;
+    const safe_current = @min(current_interleaved, total_interleaved);
+    const filled = @min(width, (safe_current * width) / total_interleaved);
+    if (filled > 0) {
+        for (0..filled) |i| bar[i] = '=';
+    }
+    if (filled < width) bar[filled] = '>';
+
+    const pct = (@as(f64, @floatFromInt(safe_current)) * 100.0) / @as(f64, @floatFromInt(total_interleaved));
+    const cur_samples_ch = safe_current / channels;
+    const total_samples_ch = total_interleaved / channels;
+    const cur_sec = @as(f64, @floatFromInt(cur_samples_ch)) / @as(f64, @floatFromInt(sampleRate));
+    const total_sec = @as(f64, @floatFromInt(total_samples_ch)) / @as(f64, @floatFromInt(sampleRate));
+    std.debug.print("\r[{s}] {d:>6.2}% {d:>7.2}s / {d:>7.2}s", .{ bar[0..], pct, cur_sec, total_sec });
+}
 
 fn printUsage() void {
     std.debug.print("Usage: zig run cli.zig -- [--play|-p] [--interactive] [--seek <sec|mm:ss|hh:mm:ss>] <input.mp3|-> [output.wav]\n", .{});
@@ -64,6 +88,77 @@ fn fmtBytes(allocator: std.mem.Allocator, n: usize) ![]u8 {
     if (n < 1024) return std.fmt.allocPrint(allocator, "{d} B", .{n});
     if (n < 1024 * 1024) return std.fmt.allocPrint(allocator, "{d:.1} KB", .{@as(f64, @floatFromInt(n)) / 1024.0});
     return std.fmt.allocPrint(allocator, "{d:.2} MB", .{@as(f64, @floatFromInt(n)) / (1024.0 * 1024.0)});
+}
+
+fn versionLabel(v: mp3decoder.Version) []const u8 {
+    return switch (v) {
+        .MPEG1 => "MPEG-1",
+        .MPEG2 => "MPEG-2",
+        .MPEG25 => "MPEG-2.5",
+    };
+}
+
+fn layerLabel(l: mp3decoder.Layer) []const u8 {
+    return switch (l) {
+        .LayerI => "Layer I",
+        .LayerII => "Layer II",
+        .LayerIII => "Layer III",
+    };
+}
+
+fn printCodecInfo(allocator: std.mem.Allocator, frameScan: *const mp3decoder.DecodeMp3FramesResult) !void {
+    if (frameScan.frameCount == 0) {
+        std.debug.print("Codec:           unknown (no MP3 frames found)\n", .{});
+        return;
+    }
+    const first = frameScan.frames.items[0];
+    var min_bitrate = first.bitrateKbps;
+    var max_bitrate = first.bitrateKbps;
+    var sum_bitrate: u64 = 0;
+    var cbr = true;
+    var same_sample_rate = true;
+    var same_channel_mode = true;
+    var same_emphasis = true;
+    var has_crc_any = first.hasCrc;
+    var has_crc_all = first.hasCrc;
+    var has_padding_any = first.padding;
+    var has_padding_all = first.padding;
+    var has_free_format_any = first.isFreeFormat;
+    var has_free_format_all = first.isFreeFormat;
+
+    for (frameScan.frames.items) |f| {
+        if (f.bitrateKbps < min_bitrate) min_bitrate = f.bitrateKbps;
+        if (f.bitrateKbps > max_bitrate) max_bitrate = f.bitrateKbps;
+        sum_bitrate += f.bitrateKbps;
+        if (f.bitrateKbps != first.bitrateKbps) cbr = false;
+        if (f.sampleRate != first.sampleRate) same_sample_rate = false;
+        if (!std.mem.eql(u8, f.channelMode, first.channelMode)) same_channel_mode = false;
+        if (!std.mem.eql(u8, f.emphasis, first.emphasis)) same_emphasis = false;
+        has_crc_any = has_crc_any or f.hasCrc;
+        has_crc_all = has_crc_all and f.hasCrc;
+        has_padding_any = has_padding_any or f.padding;
+        has_padding_all = has_padding_all and f.padding;
+        has_free_format_any = has_free_format_any or f.isFreeFormat;
+        has_free_format_all = has_free_format_all and f.isFreeFormat;
+    }
+    const avg_bitrate = @as(f64, @floatFromInt(sum_bitrate)) / @as(f64, @floatFromInt(frameScan.frameCount));
+    const duration = try fmtDuration(allocator, frameScan.durationSec);
+    defer allocator.free(duration);
+
+    std.debug.print("Codec format:    {s} {s}\n", .{ versionLabel(first.version), layerLabel(first.layer) });
+    if (cbr) {
+        std.debug.print("Bitrate:         {d} kbps (CBR)\n", .{first.bitrateKbps});
+    } else {
+        std.debug.print("Bitrate:         {d}-{d} kbps (avg {d:.2}, VBR)\n", .{ min_bitrate, max_bitrate, avg_bitrate });
+    }
+    std.debug.print("Sample rate:     {d} Hz{s}\n", .{ first.sampleRate, if (same_sample_rate) "" else " (varies per frame)" });
+    std.debug.print("Channel mode:    {s}{s}\n", .{ first.channelMode, if (same_channel_mode) "" else " (varies per frame)" });
+    std.debug.print("Emphasis:        {s}{s}\n", .{ first.emphasis, if (same_emphasis) "" else " (varies per frame)" });
+    std.debug.print("CRC protection:  {s}\n", .{if (has_crc_all) "all frames" else if (!has_crc_any) "none" else "mixed"});
+    std.debug.print("Padding:         {s}\n", .{if (has_padding_all) "all frames" else if (!has_padding_any) "none" else "mixed"});
+    std.debug.print("Free format:     {s}\n", .{if (has_free_format_all) "all frames" else if (!has_free_format_any) "none" else "mixed"});
+    std.debug.print("Frame count:     {d}\n", .{frameScan.frameCount});
+    std.debug.print("Stream length:   {s}\n", .{duration});
 }
 
 fn parseSeekSpecSeconds(raw: []const u8) ?f64 {
@@ -313,24 +408,27 @@ fn playPcmInTerminal(allocator: std.mem.Allocator, pcm: []const f32, sampleRate:
 fn parseSeekKeys(allocator: std.mem.Allocator, bytes_in: []const u8, pending: *std.ArrayList(u8), seek_delta: *i32, quit: *bool) !void {
     try pending.appendSlice(allocator, bytes_in);
     var i: usize = 0;
-    while (i < pending.items.len) : (i += 1) {
-        if (i + 2 < pending.items.len and pending.items[i] == 0x1b and pending.items[i + 1] == '[' and pending.items[i + 2] == 'C') {
+    while (i < pending.items.len) {
+        if (i + 2 < pending.items.len and pending.items[i] == 0x1b and (pending.items[i + 1] == '[' or pending.items[i + 1] == 'O') and pending.items[i + 2] == 'C') {
             seek_delta.* += 10;
-            i += 2;
+            i += 3;
             continue;
         }
-        if (i + 2 < pending.items.len and pending.items[i] == 0x1b and pending.items[i + 1] == '[' and pending.items[i + 2] == 'D') {
+        if (i + 2 < pending.items.len and pending.items[i] == 0x1b and (pending.items[i + 1] == '[' or pending.items[i + 1] == 'O') and pending.items[i + 2] == 'D') {
             seek_delta.* -= 10;
-            i += 2;
+            i += 3;
             continue;
         }
+        if (pending.items[i] == 0x1b and i + 2 >= pending.items.len) break;
         if (pending.items[i] == 'q' or pending.items[i] == 'Q' or pending.items[i] == 0x03) {
             quit.* = true;
+            pending.clearRetainingCapacity();
             return;
         }
+        i += 1;
     }
-    if (pending.items.len > 8) {
-        const keep = pending.items[pending.items.len - 8 ..];
+    if (i > 0) {
+        const keep = pending.items[i..];
         pending.clearRetainingCapacity();
         try pending.appendSlice(allocator, keep);
     }
@@ -360,8 +458,8 @@ fn playPcmInteractiveWithSeek(allocator: std.mem.Allocator, pcm: []const f32, sa
     var pending = std.ArrayList(u8).empty;
     defer pending.deinit(allocator);
     var peak: f32 = 0;
-
     std.debug.print("Controls:       <- -10s | -> +10s | q quit\n", .{});
+    printPlaybackProgress(cursor, pcm.len, sampleRate, channels);
 
     while (!stop_requested and cursor < pcm.len) {
         var child = std.process.Child.init(chosen, allocator);
@@ -384,6 +482,7 @@ fn playPcmInteractiveWithSeek(allocator: std.mem.Allocator, pcm: []const f32, sa
                 const next = @as(i64, @intCast(cursor)) + step;
                 cursor = @intCast(@max(@as(i64, 0), @min(next, @as(i64, @intCast(pcm.len)))));
                 seek_delta_sec = 0;
+                printPlaybackProgress(cursor, pcm.len, sampleRate, channels);
                 break;
             }
 
@@ -396,6 +495,7 @@ fn playPcmInteractiveWithSeek(allocator: std.mem.Allocator, pcm: []const f32, sa
             const pcm16 = encodePcm16ChunkInPlace(chunk, pcm16_chunk_buf);
             child.stdin.?.writeAll(pcm16) catch break;
             cursor += chunk_interleaved;
+            printPlaybackProgress(cursor, pcm.len, sampleRate, channels);
             std.Thread.sleep(100 * std.time.ns_per_ms);
         }
 
@@ -409,6 +509,7 @@ fn playPcmInteractiveWithSeek(allocator: std.mem.Allocator, pcm: []const f32, sa
         @as(f64, @floatFromInt(cursor / channels)) / @as(f64, @floatFromInt(sampleRate))
     else
         0;
+    std.debug.print("\n", .{});
     std.debug.print("Playback:       {s} (interactive raw PCM stream)\n", .{chosen[0]});
     return .{ .playedDurationSec = played_sec, .peak = peak, .stoppedEarly = cursor < pcm.len };
 }
@@ -430,9 +531,22 @@ fn realtimeOnChunk(chunk: []const f32) anyerror!void {
     const pcm16 = encodePcm16ChunkInPlace(out, pcm16buf[0..]);
     try rt_stdin_file.?.writeAll(pcm16);
     rt_emitted += out.len;
+
+    const now_ms = std.time.milliTimestamp();
+    if (rt_total_interleaved > 0 and (now_ms - rt_last_progress_ms >= 80 or rt_initial_seek_interleaved + rt_emitted >= rt_total_interleaved)) {
+        rt_last_progress_ms = now_ms;
+        printPlaybackProgress(rt_initial_seek_interleaved + rt_emitted, rt_total_interleaved, rt_sample_rate, rt_channels);
+    }
 }
 
-fn playRealtimeInTerminal(allocator: std.mem.Allocator, inputBytes: []const u8, sampleRate: u32, channels: u8, seekSec: f64) !mp3decoder.DecodeAllFramesRealtimeResult {
+fn playRealtimeInTerminal(
+    allocator: std.mem.Allocator,
+    inputBytes: []const u8,
+    sampleRate: u32,
+    channels: u8,
+    seekSec: f64,
+    totalInterleavedEstimate: usize,
+) !mp3decoder.DecodeAllFramesRealtimeResult {
     const player_configs = try buildPlayerConfigs(allocator, sampleRate, channels);
     defer freePlayerConfigs(allocator, player_configs);
     const chosen = choosePlayer(player_configs.all()) orelse die("Error: unable to find a terminal player (aplay/paplay/ffplay).");
@@ -447,6 +561,14 @@ fn playRealtimeInTerminal(allocator: std.mem.Allocator, inputBytes: []const u8, 
     rt_seek_remaining = @as(usize, @intFromFloat(@floor(seekSec * @as(f64, @floatFromInt(sampleRate))))) * channels;
     rt_emitted = 0;
     rt_peak = 0;
+    rt_initial_seek_interleaved = rt_seek_remaining;
+    rt_total_interleaved = totalInterleavedEstimate;
+    rt_sample_rate = sampleRate;
+    rt_channels = channels;
+    rt_last_progress_ms = 0;
+    if (rt_total_interleaved > 0) {
+        printPlaybackProgress(rt_initial_seek_interleaved, rt_total_interleaved, rt_sample_rate, rt_channels);
+    }
 
     const result = mp3decoder.decodeAllFramesRealtime(allocator, inputBytes, realtimeOnChunk) catch |e| {
         _ = child.kill() catch {};
@@ -460,6 +582,7 @@ fn playRealtimeInTerminal(allocator: std.mem.Allocator, inputBytes: []const u8, 
         .Exited => |code| if (code != 0) die("Error: player exited with non-zero status."),
         else => die("Error: player terminated unexpectedly."),
     }
+    if (rt_total_interleaved > 0) std.debug.print("\n", .{});
     std.debug.print("Playback:       {s} (realtime raw PCM stream)\n", .{chosen[0]});
     return result;
 }
@@ -484,6 +607,12 @@ pub fn main() !void {
     const in_size = try fmtBytes(allocator, input.bytes.len);
     defer allocator.free(in_size);
     std.debug.print("Input:  {s}  ({s})\n", .{ input.label, in_size });
+    var frameScan = try mp3decoder.decodeMp3Frames(allocator, input.bytes);
+    defer frameScan.frames.deinit(allocator);
+    if (frameScan.frameCount == 0) {
+        die("Error: no MPEG frame headers found in input.");
+    }
+    try printCodecInfo(allocator, &frameScan);
 
     const interactive_tty = std.fs.File.stdin().isTty() and std.fs.File.stdout().isTty();
     if (args.play and args.interactive and !interactive_tty) {
@@ -492,17 +621,16 @@ pub fn main() !void {
 
     // Realtime playback path (default): stream chunks directly while decoding.
     if (args.play and args.outputPath == null and (!args.interactive or !interactive_tty)) {
-        var frameScan = try mp3decoder.decodeMp3Frames(allocator, input.bytes);
-        defer frameScan.frames.deinit(allocator);
         if (frameScan.frameCount == 0 or frameScan.sampleRate == 0 or frameScan.channels == 0) {
             die("Error: no MPEG-1 Layer III frames decoded from input.");
         }
         if (args.seekSec > 0 and frameScan.durationSec > 0 and args.seekSec >= frameScan.durationSec) {
             die("Error: seek is beyond stream duration.");
         }
+        const totalInterleavedEstimate = @as(usize, @intFromFloat(@floor(frameScan.durationSec * @as(f64, @floatFromInt(frameScan.sampleRate))))) * frameScan.channels;
 
         std.debug.print("\nStarting realtime terminal playback...\n", .{});
-        const s = try playRealtimeInTerminal(allocator, input.bytes, frameScan.sampleRate, frameScan.channels, args.seekSec);
+        const s = try playRealtimeInTerminal(allocator, input.bytes, frameScan.sampleRate, frameScan.channels, args.seekSec, totalInterleavedEstimate);
         if (s.frameCount == 0) die("Error: no MPEG-1 Layer III frames decoded from input stream.");
 
         const played = if (s.channels > 0 and s.sampleRate > 0)
