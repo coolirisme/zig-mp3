@@ -1,0 +1,13 @@
+# Zig build outputs and caches
+.zig-cache/
+zig-out/
+
+# Local compiled binaries
+cli
+*.exe
+*.out
+
+# Editor/OS noise
+.DS_Store
+*.swp
+*.swo
