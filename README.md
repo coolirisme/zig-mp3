@@ -30,6 +30,41 @@ A Zig implementation of the MPEG I Layer III (mp3) decoder.
   - `pqmf.zig`
   - `tables.zig`
 
+## Decode Pipeline
+
+The decoder follows the standard MPEG-1 Layer III flow in `mp3decoder.zig`.
+
+1. **Frame sync + header parse**
+   - Scan bytes for sync words and parse MPEG header fields (`parseFrameHeader`).
+   - Validate version/layer/rate/length and skip inconsistent candidates.
+   - Skip ID3v2 and optional Xing/Info metadata frame in full-file decode.
+
+2. **Side info + bit reservoir setup**
+   - Read side info (`sideinfo.parseSideInfo`) and derive frame band indices.
+   - Append current frame main data to reservoir tail from prior frames.
+   - Use `mainDataBegin` to pick the true Huffman bitstream start.
+
+3. **Scale factors + Huffman spectral decode**
+   - Parse scale factors per granule/channel (`huffman.parseScaleFactors`).
+   - Decode Huffman-coded spectral lines (`huffman.parseHuffmanData`).
+   - Preserve granule-0 long-block scale factors for `scfsi` reuse.
+
+4. **Requantize + stereo processing**
+   - Requantize integer Huffman output to frequency-domain amplitudes (`requantize.requantizeGranule`).
+   - For joint stereo, apply MS/intensity stereo transforms (`stereo.processStereo`).
+
+5. **Reorder + anti-alias + IMDCT**
+   - Reorder short/mixed blocks to frequency order (`reorder.reorderSpectrum`).
+   - Apply alias reduction for eligible bands (`antialias.applyAntiAlias`).
+   - Run IMDCT with overlap-add state per channel (`imdct.applyIMDCT`).
+
+6. **Polyphase synthesis (PQMF) + output**
+   - Process each 32-subband time slice through synthesis filterbank (`pqmf.synthFilterStep`).
+   - Clamp to `[-1, 1]` float PCM and interleave channels.
+   - Emit either:
+     - one contiguous PCM buffer (`decodeAllFrames`), or
+     - streaming chunks via callback (`decodeAllFramesRealtime`).
+
 ## Build
 
 ```bash
