@@ -87,7 +87,7 @@ fn requantizeShort(samples: []const i32, output: *[576]f64, shortSf: [3][13]i32,
             // subBlockGain is 3-bit: contributes 2^(-2 * subBlockGain[win]) to the gain
             const gain = globalGainPow *
                 std.math.pow(f64, 2.0, -2.0 * @as(f64, @floatFromInt(subGain)) -
-                sfcMult * @as(f64, @floatFromInt(shortSf[win][sfb])));
+                    sfcMult * @as(f64, @floatFromInt(shortSf[win][sfb])));
 
             var k: usize = 0;
             while (k < width) : (k += 1) {

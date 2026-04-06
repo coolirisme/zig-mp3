@@ -220,7 +220,7 @@ pub fn parseHuffmanData(data: []const u8, offset: usize, maxbit: usize, bandInde
     const bigValueLimit: usize = granule.bigValues * 2;
     while (samplecount < bigValueLimit) {
         const tableCtx = getTable(samplecount, granule, region0, region1);
-            const decoded = decodeTable(tableCtx, &bitoffset, bitsArray);
+        const decoded = decodeTable(tableCtx, &bitoffset, bitsArray);
         var s0: i32 = 0;
         var s1: i32 = 0;
         if (!(decoded.size == 0 and decoded.row == 0 and decoded.col == 0)) {
