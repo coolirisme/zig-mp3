@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const mp3decoder = @import("./mp3decoder.zig");
 const wav = @import("./wav.zig");
 
@@ -16,7 +17,7 @@ const PlayerArgv = []const []const u8;
 const PlayerConfigs = struct {
     aplay: [8][]const u8,
     paplay: [5][]const u8,
-    ffplay: [13][]const u8,
+    ffplay: [7][]const u8,
 
     fn all(self: *const PlayerConfigs) [3]PlayerArgv {
         return .{
@@ -44,6 +45,7 @@ var rt_channels: u8 = 0;
 var rt_last_progress_ms: i64 = 0;
 
 fn printPlaybackProgress(current_interleaved: usize, total_interleaved: usize, sampleRate: u32, channels: u8) void {
+    if (builtin.os.tag == .windows) return;
     if (sampleRate == 0 or channels == 0 or total_interleaved == 0) return;
     const width: usize = 28;
     var bar: [width]u8 = [_]u8{' '} ** width;
@@ -261,44 +263,50 @@ fn readStdinBytes(allocator: std.mem.Allocator) ![]u8 {
     return try std.fs.File.stdin().readToEndAlloc(allocator, std.math.maxInt(usize));
 }
 
-fn shellEscapeSingleQuoted(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(allocator);
-    try out.append(allocator, '\'');
-    for (s) |c| {
-        if (c == '\'') try out.appendSlice(allocator, "'\\''") else try out.append(allocator, c);
-    }
-    try out.append(allocator, '\'');
-    return try out.toOwnedSlice(allocator);
-}
-
 fn readYoutubeMp3Bytes(allocator: std.mem.Allocator, ytUrl: []const u8) ![]u8 {
-    const escUrl = try shellEscapeSingleQuoted(allocator, ytUrl);
-    defer allocator.free(escUrl);
-
-    const cmd = try std.fmt.allocPrint(
-        allocator,
-        "yt-dlp -f ba --no-playlist -o - {s} | ffmpeg -loglevel error -i pipe:0 -f mp3 pipe:1",
-        .{escUrl},
-    );
-    defer allocator.free(cmd);
-
-    const r = std.process.Child.run(.{
+    // Keep this cross-platform and PowerShell-friendly:
+    // resolve a direct media URL via yt-dlp, then let ffmpeg fetch/transcode it.
+    const yt = std.process.Child.run(.{
         .allocator = allocator,
-        .argv = &[_][]const u8{ "sh", "-c", cmd },
+        .argv = &[_][]const u8{ "yt-dlp", "-f", "ba", "--no-playlist", "-g", ytUrl },
         .max_output_bytes = std.math.maxInt(usize),
-    }) catch die("Error: failed to run yt-dlp/ffmpeg pipeline.");
-    defer allocator.free(r.stderr);
+    }) catch die("Error: failed to run yt-dlp.");
+    defer allocator.free(yt.stderr);
+    defer allocator.free(yt.stdout);
 
-    switch (r.term) {
+    switch (yt.term) {
         .Exited => |code| if (code != 0) {
-            std.debug.print("Error: yt-dlp/ffmpeg failed.\n{s}\n", .{r.stderr});
+            std.debug.print("Error: yt-dlp failed.\n{s}\n", .{yt.stderr});
             std.process.exit(1);
         },
-        else => die("Error: yt-dlp/ffmpeg terminated unexpectedly."),
+        else => die("Error: yt-dlp terminated unexpectedly."),
     }
-    if (r.stdout.len == 0) die("Error: no bytes produced by yt-dlp/ffmpeg pipeline.");
-    return r.stdout;
+    const direct_url = std.mem.trim(u8, yt.stdout, " \r\n\t");
+    if (direct_url.len == 0) die("Error: yt-dlp did not return a direct media URL.");
+
+    const ff = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &[_][]const u8{ "ffmpeg", "-loglevel", "error", "-i", direct_url, "-f", "mp3", "pipe:1" },
+        .max_output_bytes = std.math.maxInt(usize),
+    }) catch die("Error: failed to run ffmpeg.");
+    defer allocator.free(ff.stderr);
+
+    switch (ff.term) {
+        .Exited => |code| if (code != 0) {
+            allocator.free(ff.stdout);
+            std.debug.print("Error: ffmpeg failed.\n{s}\n", .{ff.stderr});
+            std.process.exit(1);
+        },
+        else => {
+            allocator.free(ff.stdout);
+            die("Error: ffmpeg terminated unexpectedly.");
+        },
+    }
+    if (ff.stdout.len == 0) {
+        allocator.free(ff.stdout);
+        die("Error: no bytes produced by ffmpeg.");
+    }
+    return ff.stdout;
 }
 
 fn readInputBytes(allocator: std.mem.Allocator, args: CliArgs) !struct { bytes: []u8, label: []const u8 } {
@@ -333,7 +341,7 @@ fn buildPlayerConfigs(allocator: std.mem.Allocator, sampleRate: u32, channels: u
     return .{
         .aplay = .{ "aplay", "-q", "-f", "S16_LE", "-r", sr, "-c", ch },
         .paplay = .{ "paplay", "--raw", "--format=s16le", paplay_rate, paplay_channels },
-        .ffplay = .{ "ffplay", "-autoexit", "-nodisp", "-loglevel", "error", "-f", "s16le", "-ar", sr, "-channels", ch, "-i", "pipe:0" },
+        .ffplay = .{ "ffplay", "-autoexit", "-nodisp", "-loglevel", "error", "-i", "pipe:0" },
     };
 }
 
@@ -366,6 +374,8 @@ fn choosePlayer(players: [3]PlayerArgv) ?PlayerArgv {
 fn playPcmInTerminal(allocator: std.mem.Allocator, pcm: []const f32, sampleRate: u32, channels: u8) !void {
     const pcm16 = try wav.encodePcm16(allocator, pcm);
     defer allocator.free(pcm16);
+    const wav_bytes = try wav.encodeWav(allocator, pcm, sampleRate, channels);
+    defer allocator.free(wav_bytes);
 
     const player_configs = try buildPlayerConfigs(allocator, sampleRate, channels);
     defer freePlayerConfigs(allocator, player_configs);
@@ -385,14 +395,17 @@ fn playPcmInTerminal(allocator: std.mem.Allocator, pcm: []const f32, sampleRate:
             continue;
         };
 
-        try child.stdin.?.writeAll(pcm16);
+        const is_ffplay = std.mem.eql(u8, argv[0], "ffplay");
+        const payload = if (is_ffplay) wav_bytes else pcm16;
+        try child.stdin.?.writeAll(payload);
         child.stdin.?.close();
         child.stdin = null;
         const term = try child.wait();
         switch (term) {
             .Exited => |code| {
                 if (code == 0) {
-                    std.debug.print("Playback:       {s} (raw PCM stream)\n", .{argv[0]});
+                    const kind = if (std.mem.eql(u8, argv[0], "ffplay")) "WAV stream" else "raw PCM stream";
+                    std.debug.print("Playback:       {s} ({s})\n", .{ argv[0], kind });
                     return;
                 }
                 try failures.writer(allocator).print("{s}: exited with code {d}\n", .{ argv[0], code });
@@ -615,12 +628,12 @@ pub fn main() !void {
     try printCodecInfo(allocator, &frameScan);
 
     const interactive_tty = std.fs.File.stdin().isTty() and std.fs.File.stdout().isTty();
-    if (args.play and args.interactive and !interactive_tty) {
-        std.debug.print("Note: --interactive requires a TTY; falling back to realtime playback.\n", .{});
+    if (args.play and args.interactive and (!interactive_tty or builtin.os.tag == .windows)) {
+        std.debug.print("Note: --interactive requires a POSIX TTY; falling back to standard playback.\n", .{});
     }
 
     // Realtime playback path (default): stream chunks directly while decoding.
-    if (args.play and args.outputPath == null and (!args.interactive or !interactive_tty)) {
+    if (args.play and args.outputPath == null and (!args.interactive or !interactive_tty) and builtin.os.tag != .windows) {
         if (frameScan.frameCount == 0 or frameScan.sampleRate == 0 or frameScan.channels == 0) {
             die("Error: no MPEG-1 Layer III frames decoded from input.");
         }
@@ -668,7 +681,7 @@ pub fn main() !void {
     std.debug.print("Peak amplitude:  {d:.6}\n", .{peak});
 
     if (args.play) {
-        if (interactive_tty) {
+        if (interactive_tty and builtin.os.tag != .windows) {
             std.debug.print("\nStarting interactive terminal playback...\n", .{});
             const r = try playPcmInteractiveWithSeek(allocator, decoded.pcm, decoded.sampleRate, decoded.channels, args.seekSec);
             const pd = try fmtDuration(allocator, r.playedDurationSec);
