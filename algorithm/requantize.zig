@@ -1,5 +1,4 @@
 // Requantization for MPEG1 Layer III
-// ISO/IEC 11172-3 §2.4.3.4 — converts Huffman-decoded integers to floating-point
 // spectral amplitudes.
 
 const std = @import("std");

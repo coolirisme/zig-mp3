@@ -1,5 +1,4 @@
 // IMDCT and overlap-add for MPEG1 Layer III
-// ISO/IEC 11172-3 §2.4.3.4.10
 
 const std = @import("std");
 const tables = @import("./tables.zig");

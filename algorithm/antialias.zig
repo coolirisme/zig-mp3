@@ -1,5 +1,4 @@
 // Anti-alias butterfly reduction for MPEG1 Layer III
-// ISO/IEC 11172-3 §2.4.3.4.7.1
 //
 // Reduces inter-subband aliasing introduced by the polyphase filterbank.
 // Applied to the long-block frequency lines AFTER requantization and stereo

@@ -1,5 +1,4 @@
 // Mid/Side and Intensity Stereo processing for MPEG1 Layer III
-// ISO/IEC 11172-3 §2.4.3.4.9
 
 const std = @import("std");
 

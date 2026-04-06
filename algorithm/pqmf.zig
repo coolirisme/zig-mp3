@@ -1,5 +1,4 @@
 // Polyphase Synthesis Filter Bank (PQMF) for MPEG1 Layer III
-// ISO/IEC 11172-3 Annex B §B.8
 
 const std = @import("std");
 const tables = @import("./tables.zig");

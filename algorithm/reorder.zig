@@ -1,5 +1,4 @@
 // Frequency-line reordering for MPEG1 Layer III short blocks
-// ISO/IEC 11172-3 §2.4.3.4.7.3
 //
 // Background
 // ----------
